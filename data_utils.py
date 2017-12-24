@@ -3,6 +3,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.ndimage.interpolation import rotate
 import cv2
+import gc
+import torch.utils.data as data
+import torch
 
 '''Data normalization with substracting mean
    and dividing by standard deviation'''
@@ -34,6 +37,8 @@ def createThirdChannel(band1, band2, operation='average'):
         new_channel = (band1/band2)[:, :]
     elif operation == 'substraction':
         new_channel = (band1-band2)[:, :]
+    elif operation == 'multiplication':
+        new_channel = (band1 * band2)
     else:
         #In case a different method is given
         new_channel = ((band1+band2)/2)[:, :]
@@ -159,7 +164,44 @@ def getTrainData(rotate=True, rotation_angle=90, mirror=True, replaceNanWith='me
     stds = [std1, std2, std3]
 
     return means, stds, train_images, train_labels, train_inc_angles, train_ids
-    
+
+def Augment(bandList,labels, rotate=True, rotation_angle=90, mirror=True):
+
+    number_of_images = len(bandList[0])
+    numberOfBands = len(bandList)
+    train_labels = []
+    augmentedBandList = []
+
+
+    for i in range(number_of_images):
+        # Do the augmentation
+
+        augmented_images = []
+
+        for j in range(numberOfBands):
+
+            if (len(augmentedBandList)<=j ):
+                augmentedBandList.append([])
+
+            augmented_images = createAugmentedImages(bandList[j][i], rotate=rotate, rotation_angle=rotation_angle,
+                                                  mirror=mirror)
+
+            #augmented_images = np.array(augmented_images)
+
+            augmentedBandList[j].extend(augmented_images)
+
+            # Concatenate augmented images
+            # Add labels and inc_angles repeteadly
+        number_of_augmented_images = len(augmented_images)
+        for k in range(number_of_augmented_images):
+            train_labels.append(labels[i])
+
+
+    # Transform lists to np arrays
+    train_labels = np.asarray(train_labels)
+    augmentedBandList = np.asarray(augmentedBandList)
+    return (*augmentedBandList), train_labels
+
 '''Read the test data
    Do the normalization with respect to training means and standard deviations'''
 def getTestData(means, stds, replaceNanWith='mean'):
@@ -230,7 +272,7 @@ def smoothImages(images, kernel=(5,5), method='gauss', sigma=1):
         for img in images:
             smoothed_images.append(cv2.blur(img, ksize=kernel, sigma=sigma))
     
-    return smoothed_images
+    return np.array(smoothed_images)
     
 def smoothImage(img, kernel=(5,5), method='gauss', sigma=1):
     if method == 'gauss':
@@ -243,4 +285,56 @@ def smoothImage(img, kernel=(5,5), method='gauss', sigma=1):
         return cv2.bilateralFilter(img, 9, 75, 75)
     else:
         return cv2.blur(img, ksize=kernel, sigma=sigma)
-    
+
+# pixel normalization
+def PixelNormalization(band):
+    mean = np.mean(band, axis=0, keepdims=True)
+    std = np.std(band, axis=0, keepdims=True)
+    normalized_data = (band-mean)/std
+    return mean, std, normalized_data
+
+def GetTrainValidationDataForKFoldCrossValidation(train_index, val_index, bands, labels):
+
+    numberOfBands = len(bands)
+
+    trainData = [0]*numberOfBands
+    valData = [0] * numberOfBands
+    trainLabel = labels[train_index]
+    valLabel = labels[val_index]
+
+    for i in range(numberOfBands):
+        trainData[i] = bands[i][train_index]
+        valData[i] = bands[i][val_index]
+
+        mean, std, trainData[i] = normalize(trainData[i])
+        valData[i] = normalizeWithValues(valData[i], mean, std)
+
+        gc.collect()
+
+    *trainData, trainLabel = Augment(trainData, trainLabel)
+
+    train_data = np.stack(trainData, axis=1)
+    val_data = np.stack(valData, axis=1)
+
+    gc.collect()
+
+    return (IcebergData(train_data, trainLabel),
+            IcebergData(val_data, valLabel))
+
+
+class IcebergData(data.Dataset):
+
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
+
+    def __getitem__(self, index):
+        img = self.X[index]
+        label = self.y[index]
+
+        img = torch.from_numpy(img)
+        return img, label
+
+    def __len__(self):
+        return len(self.y)
+
